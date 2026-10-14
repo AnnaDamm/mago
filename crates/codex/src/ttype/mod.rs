@@ -1785,7 +1785,9 @@ fn resolve_unbound_generic_parameters(codebase: &CodebaseMetadata, union: &mut T
     }
 }
 
-fn get_iterator_method_return_type(
+/// Gets the specialized return type of an iterator protocol method.
+#[must_use]
+pub fn get_iterator_method_return_type(
     codebase: &CodebaseMetadata,
     class_metadata: &ClassLikeMetadata,
     type_parameters: Option<&[TUnion]>,
