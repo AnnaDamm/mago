@@ -4,12 +4,14 @@ use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
 use foldhash::HashSet;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
+use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use mago_codex::ttype;
@@ -186,7 +188,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
         try_block_context.possibly_thrown_exceptions = block_context.possibly_thrown_exceptions.clone();
         try_block_context.variables_possibly_in_scope = block_context.variables_possibly_in_scope.clone();
         let has_untracked_throw_source = context.settings.check_throws
-            && has_untracked_throw_source(context, &self.block, &try_block_context.possibly_thrown_exceptions);
+            && has_untracked_throw_source(
+                context,
+                &self.block,
+                &try_block_context.possibly_thrown_exceptions,
+                artifacts,
+                try_block_context.scope.get_function_like_identifier(),
+            );
 
         let try_leaves_loop = artifacts
             .loop_scope
@@ -253,15 +261,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
                     .iter()
                     .any(|previous| context.codebase.is_instance_of(caught.as_bytes(), previous.as_bytes()))
             });
-            if context.settings.check_throws
-                && context.settings.check_dead_catch
+            let catch_is_unreachable = context.settings.check_throws
                 && has_valid_caught_classes
                 && (is_covered_by_previous_catch
                     || (!has_untracked_throw_source
                         && !possibly_thrown_exceptions.keys().any(|thrown| {
                             caught_classes.iter().any(|caught| could_be_caught(context, *thrown, *caught))
-                        })))
-            {
+                        })));
+
+            if context.settings.check_dead_catch && catch_is_unreachable {
                 context.collector.report_with_code(
                     IssueCode::DeadCatch,
                     Issue::warning(
@@ -279,6 +287,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
                         "Remove the unreachable `catch` clause or make the `try` body throw a compatible exception.",
                     ),
                 );
+            }
+
+            if catch_is_unreachable {
+                catch_block_context.flags.set_inside_definitely_unreachable_code(true);
             }
 
             let mut caught_exception_types = WordSet::default();
@@ -777,69 +789,133 @@ fn has_untracked_throw_source<'arena, A>(
     context: &Context<'_, 'arena, A>,
     block: &mago_syntax::cst::Block<'arena>,
     possibly_thrown_exceptions: &WordMap<HashSet<Span>>,
+    artifacts: &AnalysisArtifacts,
+    invocation_scope: Option<FunctionLikeIdentifier>,
 ) -> bool
 where
     A: Arena,
 {
-    Node::Block(block)
-        .filter_map(|node| match node {
+    let mut pending = vec![(Node::Block(block), None)];
+    while let Some((node, enclosing_class)) = pending.pop() {
+        let class_for_children = match node {
+            Node::Class(class) => context.resolved_names.resolve(&class.name).map(word),
+            Node::Interface(interface) => context.resolved_names.resolve(&interface.name).map(word),
+            Node::Trait(r#trait) => context.resolved_names.resolve(&r#trait.name).map(word),
+            Node::Enum(r#enum) => context.resolved_names.resolve(&r#enum.name).map(word),
+            _ => enclosing_class,
+        };
+
+        if context.settings.forbid_checked_exceptions_in_callables {
+            let declared_callable = match node {
+                Node::Function(function) => context
+                    .resolved_names
+                    .resolve(&function.name)
+                    .map(|name| FunctionLikeIdentifier::Function(word(name))),
+                Node::Method(method) => {
+                    enclosing_class.map(|class| FunctionLikeIdentifier::Method(class, word(method.name.value)))
+                }
+                Node::Closure(_) | Node::ArrowFunction(_) => {
+                    Some(FunctionLikeIdentifier::for_closure(context.source_file, node.span()))
+                }
+                _ => None,
+            };
+
+            if let Some(identifier) = declared_callable
+                && !has_direct_callable_invocation_in_span(artifacts, identifier, invocation_scope, block.span())
+            {
+                // A declaration alone does not execute its body in this try block.
+                continue;
+            }
+        }
+
+        let is_untracked_throw_source = match node {
             Node::Call(call) => {
                 let span = call.span();
                 if has_tracked_throw_span(possibly_thrown_exceptions, span) {
-                    return None;
-                }
+                    false
+                } else {
+                    match call {
+                        mago_syntax::cst::Call::Function(function_call) => {
+                            let Expression::Identifier(identifier) = function_call.function else {
+                                return true;
+                            };
 
-                match call {
-                    mago_syntax::cst::Call::Function(function_call) => {
-                        let Expression::Identifier(identifier) = function_call.function else {
-                            return Some(());
-                        };
-
-                        if identifier.last_segment().eq_ignore_ascii_case(b"json_decode") {
-                            return Some(());
+                            if identifier.last_segment().eq_ignore_ascii_case(b"json_decode") {
+                                false
+                            } else if let Some(function) = context.codebase.get_function(identifier.value()) {
+                                if function.flags.is_internal() {
+                                    !function.thrown_types.is_empty()
+                                } else {
+                                    function.thrown_types.is_empty()
+                                }
+                            } else {
+                                true
+                            }
                         }
-
-                        let Some(function) = context.codebase.get_function(identifier.value()) else {
-                            return Some(());
-                        };
-
-                        let has_untracked_thrown_types = if function.flags.is_internal() {
-                            !function.thrown_types.is_empty()
-                        } else {
-                            function.thrown_types.is_empty()
-                        };
-
-                        has_untracked_thrown_types.then_some(())
+                        _ => true,
                     }
-                    _ => Some(()),
                 }
             }
             Node::Instantiation(instantiation) => {
                 let span = instantiation.span();
                 if has_tracked_throw_span(possibly_thrown_exceptions, span) {
-                    return None;
+                    false
+                } else {
+                    let Expression::Identifier(identifier) = instantiation.class else {
+                        return true;
+                    };
+
+                    let class_name = identifier.value().strip_prefix(b"\\").unwrap_or(identifier.value());
+                    if !context.codebase.is_instance_of(class_name, b"Throwable") {
+                        true
+                    } else {
+                        has_untracked_throwable_constructor(context.codebase, class_name)
+                    }
                 }
-
-                let Expression::Identifier(identifier) = instantiation.class else {
-                    return Some(());
-                };
-
-                let class_name = identifier.value().strip_prefix(b"\\").unwrap_or(identifier.value());
-                if !context.codebase.is_instance_of(class_name, b"Throwable") {
-                    return Some(());
-                }
-
-                has_untracked_throwable_constructor(context.codebase, class_name).then_some(())
             }
             Node::Foreach(_)
             | Node::Clone(_)
             | Node::ArrayAccess(_)
             | Node::PropertyAccess(_)
-            | Node::NullSafePropertyAccess(_) => Some(()),
-            _ => None,
+            | Node::NullSafePropertyAccess(_) => true,
+            _ => false,
+        };
+
+        if is_untracked_throw_source {
+            return true;
+        }
+
+        node.visit_children(|child| pending.push((child, class_for_children)));
+    }
+
+    false
+}
+
+fn has_direct_callable_invocation_in_span(
+    artifacts: &AnalysisArtifacts,
+    identifier: FunctionLikeIdentifier,
+    invocation_scope: Option<FunctionLikeIdentifier>,
+    span: Span,
+) -> bool {
+    let canonical_identifier = match identifier {
+        FunctionLikeIdentifier::Function(name) => {
+            FunctionLikeIdentifier::Function(ascii_lowercase_word(name.as_bytes()))
+        }
+        FunctionLikeIdentifier::Method(class, method) => FunctionLikeIdentifier::Method(
+            ascii_lowercase_word(class.as_bytes()),
+            ascii_lowercase_word(method.as_bytes()),
+        ),
+        FunctionLikeIdentifier::Closure(name) => FunctionLikeIdentifier::Closure(name),
+    };
+
+    artifacts.direct_callable_invocation_spans.get(&canonical_identifier).is_some_and(|invocations| {
+        invocations.iter().any(|(invocation_span, scope)| {
+            *scope == invocation_scope
+                && invocation_span.file_id == span.file_id
+                && invocation_span.start.offset >= span.start.offset
+                && invocation_span.end.offset <= span.end.offset
         })
-        .into_iter()
-        .any(|_| true)
+    })
 }
 
 fn has_tracked_throw_span(possibly_thrown_exceptions: &WordMap<HashSet<Span>>, span: Span) -> bool {

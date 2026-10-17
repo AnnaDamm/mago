@@ -28,6 +28,7 @@ use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::If;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -571,6 +572,12 @@ where
     let old_if_locals = if_block_context.locals.clone();
     let assigned_variable_ids = std::mem::take(&mut if_block_context.assigned_variable_ids);
     let possibly_assigned_variable_ids = std::mem::take(&mut if_block_context.possibly_assigned_variable_ids);
+
+    match if_statement.condition {
+        Expression::Literal(Literal::False(_)) => if_block_context.flags.set_inside_definitely_unreachable_code(true),
+        Expression::Literal(Literal::True(_)) => {}
+        _ => if_block_context.flags.set_inside_potentially_skipped_code(true),
+    }
 
     analyze_statements(if_statement.body.statements(), context, &mut if_block_context, artifacts)?;
 

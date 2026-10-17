@@ -53,7 +53,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Throw<'arena> {
             }
         }
 
-        if let Some(exception_type) = artifacts.get_expression_type(self.exception) {
+        if let Some(exception_type) = artifacts.get_expression_type(self.exception)
+            && !block_context.flags.inside_definitely_unreachable_code()
+        {
             for exception_atomic in exception_type.types.as_ref() {
                 if exception_atomic.extends_or_implements(context.codebase, b"Throwable") {
                     for object_name in exception_atomic.get_all_object_names() {

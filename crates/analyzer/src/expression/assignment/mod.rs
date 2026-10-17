@@ -42,6 +42,7 @@ use mago_word::WordSet;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallableStorageLocation;
 use crate::artifacts::CheckpointAction;
 use crate::code::IssueCode;
 use crate::context::Context;
@@ -129,6 +130,20 @@ where
         existing_target_type = block_context.locals.get(target_variable_id).cloned();
     }
 
+    let coalesce_rhs_may_be_evaluated = match assignment_operator {
+        Some(AssignmentOperator::Coalesce(_)) => artifacts
+            .get_rc_expression_type(target_expression)
+            .map(|variable_type| variable_type.as_ref())
+            .or(existing_target_type.as_deref())
+            .is_none_or(|variable_type| {
+                variable_type.is_mixed()
+                    || variable_type.has_nullish()
+                    || variable_type.possibly_undefined()
+                    || variable_type.possibly_undefined_from_try()
+            }),
+        _ => true,
+    };
+
     if let (Some(source_expression), Some(target_variable_id)) = (source_expression, &target_variable_id)
         && assignment_operator.is_none()
         && matches!(target_expression, Expression::Variable(_))
@@ -179,11 +194,7 @@ where
                     return Err(error);
                 }
                 block_context.flags.set_inside_assignment_operation(false);
-                assignment_operation_type = if let Some(assignment_span) = assignment_span {
-                    artifacts.get_rc_expression_type(&assignment_span).cloned()
-                } else {
-                    None
-                };
+                assignment_operation_type = artifacts.get_rc_expression_type(&binary_expression).cloned();
 
                 artifacts.finish_expression_type_checkpoint(CheckpointAction::Merge);
             }
@@ -198,8 +209,8 @@ where
 
     let source_type: Rc<TUnion> = if let Some(source_type) = source_type {
         Rc::new(source_type)
-    } else if let Some(assignment_operation_type) = assignment_operation_type {
-        assignment_operation_type
+    } else if let Some(assignment_operation_type) = &assignment_operation_type {
+        Rc::clone(assignment_operation_type)
     } else if let Some(source_expression) = source_expression {
         if let Some(source_type) = artifacts.get_rc_expression_type(&source_expression) {
             Rc::clone(source_type)
@@ -209,6 +220,97 @@ where
     } else {
         Rc::new(get_mixed())
     };
+
+    if (assignment_operator.is_none()
+        || matches!(assignment_operator, Some(AssignmentOperator::Coalesce(_) | AssignmentOperator::Addition(_))))
+        && source_expression.is_some()
+        && coalesce_rhs_may_be_evaluated
+        && context.settings.check_throws
+        && context.settings.forbid_checked_exceptions_in_callables
+        && !block_context.flags.inside_definitely_unreachable_code()
+    {
+        if let Some(source_expression) = source_expression {
+            for parameter_offset in crate::invocation::callbacks::callable_parameter_offsets_referenced_in_expression(
+                block_context,
+                source_expression,
+            ) {
+                artifacts.record_callback_parameter_escape(parameter_offset);
+            }
+        }
+
+        let escapes_scope = block_context.is_global_scope()
+            || target_variable_id
+                .is_some_and(|variable| block_context.references_to_external_scope.contains(&variable))
+            || crate::callables::callable_storage_target_is_static_local(
+                target_expression,
+                &block_context.static_locals,
+            )
+            || crate::callables::callable_storage_target_escapes_scope(target_expression);
+
+        let storage_location = if crate::callables::is_local_callable_storage_expression(target_expression) {
+            target_variable_id.map(|variable| CallableStorageLocation {
+                scope: block_context.scope.get_function_like_identifier(),
+                variable,
+            })
+        } else {
+            None
+        };
+
+        if assignment_operator.is_none()
+            && !block_context.flags.inside_potentially_skipped_code()
+            && let Some(storage_location) = storage_location
+        {
+            artifacts.clear_callable_storage_location(storage_location);
+        }
+
+        let callable_source_type = match assignment_operator {
+            Some(AssignmentOperator::Coalesce(_)) => Some(
+                source_expression
+                    .and_then(|source| artifacts.get_rc_expression_type(source))
+                    .cloned()
+                    .unwrap_or_else(|| Rc::clone(&source_type)),
+            ),
+            Some(AssignmentOperator::Addition(_)) => None,
+            _ => Some(Rc::clone(&source_type)),
+        };
+
+        if let Some(callable_source_type) = callable_source_type {
+            crate::callables::record_stored_callables(
+                artifacts,
+                &callable_source_type,
+                context.codebase,
+                escapes_scope,
+                storage_location,
+            );
+        }
+
+        if matches!(assignment_operator, Some(AssignmentOperator::Addition(_)))
+            && let Some(source_expression) = source_expression
+            && let Some(left_type) = artifacts
+                .get_rc_expression_type(target_expression)
+                .cloned()
+                .or_else(|| existing_target_type.as_ref().map(Rc::clone))
+        {
+            crate::callables::record_stored_array_callables(
+                artifacts,
+                &left_type,
+                context.codebase,
+                escapes_scope,
+                storage_location,
+            );
+
+            if let Some(right_type) = artifacts.get_rc_expression_type(source_expression).cloned() {
+                crate::callables::record_array_plus_rhs_callables(
+                    artifacts,
+                    &left_type,
+                    &right_type,
+                    context.codebase,
+                    escapes_scope,
+                    storage_location,
+                );
+            }
+        }
+    }
 
     if let (Some(target_variable_id), None) = (&target_variable_id, assignment_operator)
         && block_context.flags.inside_loop()
@@ -270,6 +372,38 @@ where
         false,
         property_write_kind,
     )?;
+
+    if successful
+        && assignment_operator.is_none()
+        && matches!(unwrap_expression(target_expression), Expression::ArrayAccess(_))
+        && context.settings.check_throws
+        && context.settings.forbid_checked_exceptions_in_callables
+        && !block_context.flags.inside_potentially_skipped_code()
+        && !block_context.flags.inside_definitely_unreachable_code()
+        && crate::callables::is_local_callable_storage_expression(target_expression)
+        && let Some(root_variable) = get_root_expression_id(target_expression)
+        && let Some(root_type) = block_context.locals.get(&root_variable)
+    {
+        let escapes_scope = block_context.is_global_scope()
+            || target_variable_id
+                .is_some_and(|variable| block_context.references_to_external_scope.contains(&variable))
+            || crate::callables::callable_storage_target_is_static_local(
+                target_expression,
+                &block_context.static_locals,
+            )
+            || crate::callables::callable_storage_target_escapes_scope(target_expression);
+
+        crate::callables::refresh_stored_array_callables(
+            artifacts,
+            root_type,
+            context.codebase,
+            escapes_scope,
+            CallableStorageLocation {
+                scope: block_context.scope.get_function_like_identifier(),
+                variable: root_variable,
+            },
+        );
+    }
 
     if !successful {
         if matches!(

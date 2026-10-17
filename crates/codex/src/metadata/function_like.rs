@@ -98,6 +98,10 @@ pub struct FunctionLikeMetadata {
     /// Ordered list of metadata for each parameter defined in the signature.
     pub parameters: Vec<FunctionLikeParameterMetadata>,
 
+    /// Parameter offsets whose callable arguments are invoked directly and do not escape this function.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub synchronously_invoked_callable_parameters: Vec<usize>,
+
     /// The explicit return type declaration (type hint).
     ///
     /// Example: For `function getName(): string`, this holds metadata for `string`.
@@ -223,6 +227,7 @@ impl FunctionLikeMetadata {
             original_name,
             name_span: None,
             parameters: vec![],
+            synchronously_invoked_callable_parameters: vec![],
             return_type_declaration_metadata: None,
             return_type_metadata: None,
             template_types: TemplateTypes::default(),
@@ -490,6 +495,10 @@ impl FunctionLikeMetadata {
             if let Some(default) = &replacement.default_type {
                 slot.default_type = Some(default.clone());
             }
+        }
+
+        if !patch.synchronously_invoked_callable_parameters.is_empty() {
+            self.synchronously_invoked_callable_parameters.clone_from(&patch.synchronously_invoked_callable_parameters);
         }
     }
 

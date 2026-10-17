@@ -134,6 +134,22 @@ fn analyze_invocation_targets<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
+    if context.settings.check_throws
+        && context.settings.forbid_checked_exceptions_in_callables
+        && !block_context.flags.inside_definitely_unreachable_code()
+    {
+        for target in &invocation_targets {
+            if let Some(identifier) = target.get_function_like_identifier() {
+                artifacts.record_direct_callable_invocation(
+                    *identifier,
+                    None,
+                    call_span,
+                    block_context.scope.get_function_like_identifier(),
+                );
+            }
+        }
+    }
+
     let method_name_for_assertions: Option<Word> = invocation_targets.iter().find_map(|target| {
         if let InvocationTarget::FunctionLike {
             identifier: FunctionLikeIdentifier::Method(_, _),
@@ -264,7 +280,14 @@ where
             resulting_type
         }
     } else {
+        let is_reachable = !block_context.flags.inside_definitely_unreachable_code();
+        if is_reachable {
+            crate::callables::record_unresolved_callable_closure_arguments(context, artifacts, &invocation_arguments);
+        }
         analyze_invocation_arguments_source(context, block_context, artifacts, &invocation_arguments)?;
+        if is_reachable {
+            crate::callables::record_unresolved_callable_arguments(context, artifacts, &invocation_arguments);
+        }
 
         if encountered_mixed_targets {
             get_mixed()

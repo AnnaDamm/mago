@@ -37,6 +37,16 @@ macro_rules! test_case {
             test.run();
         }
     };
+    ($test_name:ident, $settings:expr, issues = [$($issue:literal),* $(,)?]) => {
+        #[test]
+        fn $test_name() {
+            let content = include_bytes!(concat!("cases/", stringify!($test_name), ".php"));
+            $crate::framework::TestCase::new(stringify!($test_name), content)
+                .settings($settings)
+                .expect_issues(vec![$($issue),*])
+                .run();
+        }
+    };
     ($test_name:ident, $settings:expr) => {
         #[test]
         fn $test_name() {
@@ -48,6 +58,33 @@ macro_rules! test_case {
         #[test]
         fn $test_name() {
             let content = include_bytes!(concat!("cases/", stringify!($test_name), ".php"));
+            $crate::framework::TestCase::new(stringify!($test_name), content).run();
+        }
+    };
+}
+
+macro_rules! issue_2505_test_case {
+    ($test_name:ident, $settings:expr, issues = [$($issue:literal),* $(,)?]) => {
+        #[test]
+        fn $test_name() {
+            let content = include_bytes!(concat!("cases/issue_2505/", stringify!($test_name), ".php"));
+            $crate::framework::TestCase::new(stringify!($test_name), content)
+                .settings($settings)
+                .expect_issues(vec![$($issue),*])
+                .run();
+        }
+    };
+    ($test_name:ident, $settings:expr) => {
+        #[test]
+        fn $test_name() {
+            let content = include_bytes!(concat!("cases/issue_2505/", stringify!($test_name), ".php"));
+            $crate::framework::TestCase::new(stringify!($test_name), content).settings($settings).run();
+        }
+    };
+    ($test_name:ident) => {
+        #[test]
+        fn $test_name() {
+            let content = include_bytes!(concat!("cases/issue_2505/", stringify!($test_name), ".php"));
             $crate::framework::TestCase::new(stringify!($test_name), content).run();
         }
     };
@@ -326,6 +363,352 @@ test_case!(issue_2503_check_throws_disabled, {
     settings.check_throws = false;
     settings
 });
+
+test_case!(
+    forbid_checked_exceptions_in_callables,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings.allowed_checked_exception_callables.insert(mago_word::word(b"trusted_callbacks:0"));
+        settings.allowed_checked_exception_callables.insert(mago_word::word(b"trusteddispatcher::consume:0"));
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+test_case!(deferred_callable_callback_classification, {
+    let mut settings = default_test_settings();
+    settings.forbid_checked_exceptions_in_callables = true;
+    settings
+});
+test_case!(deferred_callable_exception_option_disabled);
+test_case!(deferred_callable_exception_without_check_throws, {
+    let mut settings = default_test_settings();
+    settings.check_throws = false;
+    settings.forbid_checked_exceptions_in_callables = true;
+    settings
+});
+test_case!(
+    issue_2505_uninvoked_callable_body_does_not_keep_catch_reachable,
+    {
+        let mut settings = default_test_settings();
+        settings.check_dead_catch = true;
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["dead-catch"]
+);
+
+issue_2505_test_case!(
+    issue_2505_redundant_coalesce_assignment_does_not_store_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["redundant-null-coalesce"]
+);
+issue_2505_test_case!(
+    issue_2505_nullable_coalesce_restores_storage_context,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unused-statement", "unused-statement"]
+);
+issue_2505_test_case!(issue_2505_array_union_duplicate_key_ignores_rhs_callable, {
+    let mut settings = default_test_settings();
+    settings.forbid_checked_exceptions_in_callables = true;
+    settings
+});
+issue_2505_test_case!(issue_2505_array_union_duplicate_integer_key_ignores_rhs_callable, {
+    let mut settings = default_test_settings();
+    settings.forbid_checked_exceptions_in_callables = true;
+    settings
+});
+issue_2505_test_case!(issue_2505_array_union_keyed_integer_key_ignores_rhs_callable, {
+    let mut settings = default_test_settings();
+    settings.forbid_checked_exceptions_in_callables = true;
+    settings
+});
+issue_2505_test_case!(
+    issue_2505_array_union_generic_list_tracks_rhs_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_array_union_generic_list_tracks_keyed_rhs_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_array_union_mixed_list_tracks_rhs_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_array_union_generic_array_tracks_rhs_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(issue_2505_array_union_non_empty_list_keeps_left_callable, {
+    let mut settings = default_test_settings();
+    settings.forbid_checked_exceptions_in_callables = true;
+    settings
+});
+issue_2505_test_case!(
+    issue_2505_array_union_ignores_invokable_lhs_arm,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["possibly-invalid-operand"]
+);
+issue_2505_test_case!(
+    issue_2505_array_union_in_dead_code_does_not_store_rhs_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type", "impossible-condition"]
+);
+issue_2505_test_case!(
+    issue_2505_unreachable_callable_storage_is_ignored,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = [
+        "unhandled-thrown-type",
+        "unhandled-thrown-type",
+        "impossible-condition",
+        "impossible-condition",
+        "impossible-condition"
+    ]
+);
+issue_2505_test_case!(
+    issue_2505_dead_conditional_expression_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type", "impossible-condition"]
+);
+issue_2505_test_case!(
+    issue_2505_unreachable_return_does_not_contaminate_inferred_type,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["impossible-condition"]
+);
+issue_2505_test_case!(
+    issue_2505_direct_callable_throw_reachability,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings.check_dead_catch = true;
+        settings
+    },
+    issues = []
+);
+issue_2505_test_case!(
+    issue_2505_callback_invocation_result_not_escape,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = []
+);
+issue_2505_test_case!(issue_2505_unreachable_catch_callable_tracking, {
+    let mut settings = default_test_settings();
+    settings.forbid_checked_exceptions_in_callables = true;
+    settings.check_dead_catch = true;
+    settings
+});
+issue_2505_test_case!(
+    issue_2505_unreachable_catch_invocation_does_not_mark_callable_used,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings.check_dead_catch = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_non_array_addition_does_not_store_rhs_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["invalid-operand", "mixed-assignment"]
+);
+issue_2505_test_case!(
+    issue_2505_dead_short_circuit_rhs_callable_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = [
+        "redundant-logical-operation",
+        "redundant-logical-operation",
+        "redundant-logical-operation",
+        "redundant-null-coalesce"
+    ]
+);
+issue_2505_test_case!(
+    issue_2505_dead_recursive_callable_does_not_keep_catch_reachable,
+    {
+        let mut settings = default_test_settings();
+        settings.check_dead_catch = true;
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["dead-catch"]
+);
+issue_2505_test_case!(
+    issue_2505_array_entry_invocation_tracks_only_invoked_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_array_root_reassignment_clears_indexed_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = []
+);
+issue_2505_test_case!(
+    issue_2505_array_child_assignment_clears_root_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = []
+);
+issue_2505_test_case!(
+    issue_2505_unset_array_root_clears_indexed_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = []
+);
+issue_2505_test_case!(
+    issue_2505_unset_array_index_clears_indexed_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = []
+);
+issue_2505_test_case!(
+    issue_2505_conditional_unset_preserves_callable_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_unset_in_other_scope_preserves_callable_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_unreachable_unset_preserves_callable_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type", "impossible-condition"]
+);
+issue_2505_test_case!(
+    issue_2505_unset_throwing_index_preserves_callable_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_unset_dynamic_index_throw_preserves_callable_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
+issue_2505_test_case!(
+    issue_2505_unset_prior_operand_throw_preserves_later_callable_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["possibly-undefined-string-array-index", "invalid-callable", "unhandled-thrown-type"]
+);
+
+test_case!(
+    coalesce_assignment_tracks_deferred_callable,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["mixed-assignment"]
+);
+test_case!(
+    deferred_method_array_union_storage,
+    {
+        let mut settings = default_test_settings();
+        settings.forbid_checked_exceptions_in_callables = true;
+        settings
+    },
+    issues = ["unhandled-thrown-type"]
+);
 test_case!(docblock_param_out);
 test_case!(docblock_assert_method);
 test_case!(docblock_assert_if_true);
@@ -2963,17 +3346,26 @@ test_case!(switch_paradoxical_unreachable_case_detection);
 #[cfg_attr(miri, ignore)]
 fn test_all_test_cases_are_ran() {
     let test_case_file = include_str!("mod.rs").split_whitespace().collect::<String>();
-    let test_cases_dir = fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases")).unwrap();
+    let mut directories = vec![std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases"))];
 
-    for entry in test_cases_dir {
-        let path = entry.unwrap().path();
-        if !path.is_file() {
-            continue;
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+
+            if path.extension().and_then(|extension| extension.to_str()) != Some("php") {
+                continue;
+            }
+
+            let file_name = path.file_stem().unwrap().to_str().unwrap();
+            let has_test = test_case_file.contains(&format!("test_case!({file_name})"))
+                || test_case_file.contains(&format!("test_case!({file_name},"))
+                || test_case_file.contains(&format!("issue_2505_test_case!({file_name})"))
+                || test_case_file.contains(&format!("issue_2505_test_case!({file_name},"));
+            assert!(has_test, "File '{file_name}' was not found as a test case");
         }
-
-        let file_name = path.file_stem().unwrap().to_str().unwrap();
-        let has_test = test_case_file.contains(&format!("test_case!({file_name})"))
-            || test_case_file.contains(&format!("test_case!({file_name},"));
-        assert!(has_test, "File '{file_name}' was not found as a test case");
     }
 }

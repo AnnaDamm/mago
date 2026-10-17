@@ -249,7 +249,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
             }
         }
 
-        if context.settings.check_throws && context.plugin_registry.has_expression_throw_providers() {
+        if context.settings.check_throws
+            && !block_context.flags.inside_definitely_unreachable_code()
+            && context.plugin_registry.has_expression_throw_providers()
+        {
             let exceptions = context
                 .plugin_registry
                 .get_external_expression_thrown_exceptions(

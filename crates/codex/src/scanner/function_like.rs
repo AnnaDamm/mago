@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use mago_allocator::Arena;
+use mago_names::ResolvedNames;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::AssertPattern;
 use mago_phpdoc_syntax::cst::AssertTagValue;
@@ -10,22 +13,34 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::AnonymousClass;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::ArrowFunction;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::Class;
 use mago_syntax::cst::Closure;
+use mago_syntax::cst::Construct;
+use mago_syntax::cst::Enum;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Function;
+use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::IfBody;
+use mago_syntax::cst::Interface;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::SwitchBody;
 use mago_syntax::cst::SwitchCase;
+use mago_syntax::cst::Trait;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::utils;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
@@ -152,6 +167,10 @@ where
     );
 
     if let MethodBody::Concrete(block) = &method.body {
+        scan_synchronously_invoked_callback_parameters(&mut metadata, block, context.resolved_names);
+    }
+
+    if let MethodBody::Concrete(block) = &method.body {
         infer_assertions_from_block_body(block, &mut metadata, context.resolved_names);
     }
 
@@ -233,6 +252,8 @@ where
 
     scan_function_like_docblock(function.span(), functionlike_id, &mut metadata, classname, context, scope);
 
+    scan_synchronously_invoked_callback_parameters(&mut metadata, &function.body, context.resolved_names);
+
     infer_assertions_from_block_body(&function.body, &mut metadata, context.resolved_names);
 
     if metadata.attributes.iter().any(|attr| attr.name.as_bytes().eq_ignore_ascii_case(b"Deprecated")) {
@@ -240,6 +261,385 @@ where
     }
 
     Some(metadata)
+}
+
+fn scan_synchronously_invoked_callback_parameters<'arena>(
+    metadata: &mut FunctionLikeMetadata,
+    body: &'arena Block<'arena>,
+    resolved_names: &ResolvedNames<'arena>,
+) {
+    if metadata.flags.has_yield() {
+        return;
+    }
+
+    for (parameter_offset, parameter) in metadata.parameters.iter().enumerate() {
+        let mut scan = CallbackInvocationScan {
+            parameter_name: parameter.get_name().0.as_bytes(),
+            function_depth: 0,
+            control_flow_depth: 0,
+            known_string_variables: HashMap::default(),
+            invocation_target_span: None,
+            invoked: false,
+            escaped: false,
+        };
+
+        let walker = CallbackInvocationWalker { resolved_names };
+        mago_syntax::walker::walk_block(&walker, body, &mut scan);
+
+        if scan.invoked && !scan.escaped {
+            metadata.synchronously_invoked_callable_parameters.push(parameter_offset);
+        }
+    }
+}
+
+struct CallbackInvocationWalker<'resolved_names, 'arena> {
+    resolved_names: &'resolved_names ResolvedNames<'arena>,
+}
+
+struct CallbackInvocationScan<'parameter_name> {
+    parameter_name: &'parameter_name [u8],
+    function_depth: usize,
+    control_flow_depth: usize,
+    known_string_variables: HashMap<Vec<u8>, Vec<u8>>,
+    invocation_target_span: Option<Span>,
+    invoked: bool,
+    escaped: bool,
+}
+
+impl<'ast, 'arena, 'parameter_name> Walker<'ast, 'arena, CallbackInvocationScan<'parameter_name>>
+    for CallbackInvocationWalker<'_, 'arena>
+{
+    fn walk_function_call(
+        &self,
+        function_call: &'ast FunctionCall<'arena>,
+        scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+        if scan.function_depth == 0
+            && let Expression::Identifier(identifier) = function_call.function.unparenthesized()
+        {
+            let source_name = identifier.value();
+            let is_unqualified_unimported =
+                !source_name.contains(&b'\\') && !self.resolved_names.is_imported(identifier);
+            let resolved_name = self.resolved_names.resolve(identifier).unwrap_or(source_name);
+            let is_resolved_dynamic_scope_call = is_dynamic_scope_function_name(resolved_name);
+            let is_dynamic_scope_call = is_resolved_dynamic_scope_call
+                || (is_unqualified_unimported && is_dynamic_scope_function_name(source_name));
+            let dynamic_scope_name = if is_resolved_dynamic_scope_call { resolved_name } else { source_name };
+            if is_dynamic_scope_call && is_compact_function_name(dynamic_scope_name) {
+                // `compact()` exposes only the named locals. Unknown name expressions
+                // remain conservative, while unrelated literal names do not escape
+                // this callback parameter.
+                scan.escaped |= function_call.argument_list.arguments.iter().any(|argument| {
+                    compact_argument_escapes_callback(
+                        argument.value(),
+                        scan.parameter_name,
+                        &scan.known_string_variables,
+                    )
+                });
+            } else if is_dynamic_scope_call {
+                // These functions expose parameters without a direct variable reference.
+                scan.escaped = true;
+            }
+        }
+
+        let invoked_parameter = if scan.function_depth == 0 {
+            direct_variable(function_call.function)
+                .filter(|(name, _)| *name == scan.parameter_name)
+                .map(|(_, span)| span)
+        } else {
+            None
+        };
+
+        let previous_target_span = std::mem::replace(&mut scan.invocation_target_span, invoked_parameter);
+        scan.invoked |= invoked_parameter.is_some();
+        mago_syntax::walker::walk_function_call(self, function_call, scan);
+        scan.invocation_target_span = previous_target_span;
+    }
+
+    fn walk_direct_variable(
+        &self,
+        variable: &'ast mago_syntax::cst::DirectVariable<'arena>,
+        scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+        if variable.name == scan.parameter_name && scan.invocation_target_span != Some(variable.span) {
+            scan.escaped = true;
+        }
+    }
+
+    fn walk_indirect_variable(
+        &self,
+        variable: &'ast mago_syntax::cst::IndirectVariable<'arena>,
+        scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+        if scan.function_depth == 0
+            && dynamic_expression_value(variable.expression, &scan.known_string_variables)
+                .is_none_or(|name| name.as_slice() == callback_variable_name(scan.parameter_name))
+        {
+            scan.escaped = true;
+        }
+        mago_syntax::walker::walk_indirect_variable(self, variable, scan);
+    }
+
+    fn walk_nested_variable(
+        &self,
+        variable: &'ast mago_syntax::cst::NestedVariable<'arena>,
+        scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+        if scan.function_depth == 0
+            && dynamic_variable_value(variable.variable, &scan.known_string_variables)
+                .is_none_or(|name| name.as_slice() == callback_variable_name(scan.parameter_name))
+        {
+            scan.escaped = true;
+        }
+        mago_syntax::walker::walk_nested_variable(self, variable, scan);
+    }
+
+    fn walk_assignment(
+        &self,
+        assignment: &'ast mago_syntax::cst::Assignment<'arena>,
+        scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+        let assigned_variable = match assignment.lhs {
+            Expression::Variable(Variable::Direct(variable)) => Some(variable.name),
+            _ => None,
+        };
+        let assigned_string = if assignment.operator.is_assign() { literal_string_value(assignment.rhs) } else { None };
+
+        mago_syntax::walker::walk_assignment(self, assignment, scan);
+
+        if scan.function_depth != 0 || scan.control_flow_depth != 0 {
+            return;
+        }
+
+        if let Some(name) = assigned_variable {
+            if let Some(value) = assigned_string {
+                scan.known_string_variables.insert(name.to_vec(), value.to_vec());
+            } else {
+                scan.known_string_variables.remove(name);
+            }
+        } else {
+            // A variable-variable or other indirect write can invalidate any
+            // previously learned local name.
+            scan.known_string_variables.clear();
+        }
+    }
+
+    fn walk_statement(&self, statement: &'ast Statement<'arena>, scan: &mut CallbackInvocationScan<'parameter_name>) {
+        let changes_variable_scope =
+            matches!(statement, Statement::Global(_) | Statement::Static(_) | Statement::Unset(_));
+        let branches = matches!(
+            statement,
+            Statement::DoWhile(_)
+                | Statement::For(_)
+                | Statement::Foreach(_)
+                | Statement::If(_)
+                | Statement::Switch(_)
+                | Statement::Try(_)
+                | Statement::While(_)
+        );
+
+        if scan.function_depth == 0 && branches {
+            scan.known_string_variables.clear();
+            scan.control_flow_depth += 1;
+            mago_syntax::walker::walk_statement(self, statement, scan);
+            scan.control_flow_depth -= 1;
+        } else {
+            mago_syntax::walker::walk_statement(self, statement, scan);
+        }
+
+        if scan.function_depth == 0 && changes_variable_scope {
+            scan.known_string_variables.clear();
+        }
+    }
+
+    fn walk_expression(
+        &self,
+        expression: &'ast Expression<'arena>,
+        scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+        let branches = match expression {
+            Expression::Conditional(_) | Expression::Match(_) => true,
+            Expression::Binary(binary) => matches!(
+                binary.operator,
+                BinaryOperator::NullCoalesce(_)
+                    | BinaryOperator::And(_)
+                    | BinaryOperator::Or(_)
+                    | BinaryOperator::LowAnd(_)
+                    | BinaryOperator::LowOr(_)
+            ),
+            _ => false,
+        };
+        let preserves_string_facts = match expression {
+            Expression::Call(call) => is_dynamic_scope_call(call, self.resolved_names),
+            _ => false,
+        };
+        let may_mutate_variables = match expression {
+            Expression::Call(_) | Expression::Instantiation(_) => true,
+            Expression::Construct(Construct::Isset(construct)) => {
+                construct.values.iter().any(|value| direct_variable(value).is_none())
+            }
+            Expression::Construct(Construct::Empty(construct)) => direct_variable(construct.value).is_none(),
+            Expression::Construct(_) => true,
+            _ => false,
+        };
+
+        if scan.function_depth == 0 && branches {
+            scan.known_string_variables.clear();
+            scan.control_flow_depth += 1;
+            mago_syntax::walker::walk_expression(self, expression, scan);
+            scan.control_flow_depth -= 1;
+        } else {
+            mago_syntax::walker::walk_expression(self, expression, scan);
+        }
+
+        if scan.function_depth == 0 && may_mutate_variables && !preserves_string_facts {
+            // An unknown call or include can mutate locals passed by reference.
+            // Drop the facts instead of treating stale names as exact.
+            scan.known_string_variables.clear();
+        }
+    }
+
+    fn walk_closure(&self, closure: &'ast Closure<'arena>, scan: &mut CallbackInvocationScan<'parameter_name>) {
+        scan.function_depth += 1;
+        mago_syntax::walker::walk_closure(self, closure, scan);
+        scan.function_depth -= 1;
+    }
+
+    fn walk_arrow_function(
+        &self,
+        arrow_function: &'ast ArrowFunction<'arena>,
+        scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+        scan.function_depth += 1;
+        mago_syntax::walker::walk_arrow_function(self, arrow_function, scan);
+        scan.function_depth -= 1;
+    }
+
+    fn walk_function(&self, _function: &'ast Function<'arena>, _scan: &mut CallbackInvocationScan<'parameter_name>) {}
+
+    fn walk_class(&self, _class: &'ast Class<'arena>, _scan: &mut CallbackInvocationScan<'parameter_name>) {}
+
+    fn walk_interface(&self, _interface: &'ast Interface<'arena>, _scan: &mut CallbackInvocationScan<'parameter_name>) {
+    }
+
+    fn walk_trait(&self, _trait_node: &'ast Trait<'arena>, _scan: &mut CallbackInvocationScan<'parameter_name>) {}
+
+    fn walk_enum(&self, _enum_node: &'ast Enum<'arena>, _scan: &mut CallbackInvocationScan<'parameter_name>) {}
+
+    fn walk_anonymous_class(
+        &self,
+        _anonymous_class: &'ast AnonymousClass<'arena>,
+        _scan: &mut CallbackInvocationScan<'parameter_name>,
+    ) {
+    }
+}
+
+fn direct_variable<'arena>(expression: &Expression<'arena>) -> Option<(&'arena [u8], Span)> {
+    match expression {
+        Expression::Variable(Variable::Direct(variable)) => Some((variable.name, variable.span)),
+        Expression::Parenthesized(parenthesized) => direct_variable(parenthesized.expression),
+        _ => None,
+    }
+}
+
+fn literal_string_value<'arena>(expression: &Expression<'arena>) -> Option<&'arena [u8]> {
+    match expression {
+        Expression::Parenthesized(parenthesized) => literal_string_value(parenthesized.expression),
+        Expression::Literal(Literal::String(literal)) => literal.value,
+        _ => None,
+    }
+}
+
+fn compact_argument_escapes_callback(
+    expression: &Expression<'_>,
+    parameter_name: &[u8],
+    known_variables: &HashMap<Vec<u8>, Vec<u8>>,
+) -> bool {
+    let parameter_name = callback_variable_name(parameter_name);
+    match expression {
+        Expression::Parenthesized(parenthesized) => {
+            compact_argument_escapes_callback(parenthesized.expression, parameter_name, known_variables)
+        }
+        Expression::Literal(Literal::String(literal)) => literal.value.is_none_or(|name| name == parameter_name),
+        Expression::Array(array) => array.elements.iter().any(|element| match element {
+            ArrayElement::KeyValue(element) => {
+                compact_argument_escapes_callback(element.value, parameter_name, known_variables)
+            }
+            ArrayElement::Value(element) => {
+                compact_argument_escapes_callback(element.value, parameter_name, known_variables)
+            }
+            ArrayElement::Variadic(_) => true,
+            ArrayElement::Missing(_) => false,
+        }),
+        Expression::LegacyArray(array) => array.elements.iter().any(|element| match element {
+            ArrayElement::KeyValue(element) => {
+                compact_argument_escapes_callback(element.value, parameter_name, known_variables)
+            }
+            ArrayElement::Value(element) => {
+                compact_argument_escapes_callback(element.value, parameter_name, known_variables)
+            }
+            ArrayElement::Variadic(_) => true,
+            ArrayElement::Missing(_) => false,
+        }),
+        _ => dynamic_expression_value(expression, known_variables).is_none_or(|name| name.as_slice() == parameter_name),
+    }
+}
+
+fn callback_variable_name(parameter_name: &[u8]) -> &[u8] {
+    parameter_name.strip_prefix(b"$").unwrap_or(parameter_name)
+}
+
+fn dynamic_variable_value(variable: &Variable<'_>, known_variables: &HashMap<Vec<u8>, Vec<u8>>) -> Option<Vec<u8>> {
+    match variable {
+        Variable::Direct(variable) => known_variables.get(variable.name).cloned(),
+        Variable::Indirect(variable) => {
+            let name = dynamic_expression_value(variable.expression, known_variables)?;
+            known_variables.get(name.as_slice()).cloned()
+        }
+        Variable::Nested(variable) => {
+            let name = dynamic_variable_value(variable.variable, known_variables)?;
+            known_variables.get(name.as_slice()).cloned()
+        }
+    }
+}
+
+fn dynamic_expression_value(
+    expression: &Expression<'_>,
+    known_variables: &HashMap<Vec<u8>, Vec<u8>>,
+) -> Option<Vec<u8>> {
+    match expression {
+        Expression::Literal(Literal::String(literal)) => literal.value.map(<[u8]>::to_vec),
+        Expression::Parenthesized(parenthesized) => dynamic_expression_value(parenthesized.expression, known_variables),
+        Expression::Variable(variable) => dynamic_variable_value(variable, known_variables),
+        _ => None,
+    }
+}
+
+fn is_dynamic_scope_function_name(name: &[u8]) -> bool {
+    let name = name.strip_prefix(b"\\").unwrap_or(name);
+    [b"get_defined_vars".as_slice(), b"compact", b"func_get_args", b"func_get_arg"]
+        .iter()
+        .any(|function_name| name.eq_ignore_ascii_case(function_name))
+}
+
+fn is_compact_function_name(name: &[u8]) -> bool {
+    name.strip_prefix(b"\\").unwrap_or(name).eq_ignore_ascii_case(b"compact")
+}
+
+fn is_dynamic_scope_call(call: &mago_syntax::cst::Call<'_>, resolved_names: &ResolvedNames<'_>) -> bool {
+    let mago_syntax::cst::Call::Function(function_call) = call else {
+        return false;
+    };
+    let Expression::Identifier(identifier) = function_call.function.unparenthesized() else {
+        return false;
+    };
+
+    let source_name = identifier.value();
+    let is_unqualified_unimported = !source_name.contains(&b'\\') && !resolved_names.is_imported(identifier);
+    let resolved_name = resolved_names.resolve(identifier).unwrap_or(source_name);
+
+    is_dynamic_scope_function_name(resolved_name)
+        || (is_unqualified_unimported && is_dynamic_scope_function_name(source_name))
 }
 
 #[inline]

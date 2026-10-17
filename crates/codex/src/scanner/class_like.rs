@@ -1590,6 +1590,7 @@ fn create_enum_method(
         original_name: word(name),
         name_span: Some(enum_method_span),
         parameters,
+        synchronously_invoked_callable_parameters: Vec::default(),
         return_type_declaration_metadata: Some(TypeMetadata::new(return_type.clone(), enum_method_span)),
         return_type_metadata: Some(TypeMetadata::new(return_type, enum_method_span)),
         template_types: TemplateTypes::default(),
