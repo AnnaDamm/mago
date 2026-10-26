@@ -7,6 +7,16 @@ use crate::metadata::ttype::TypeMetadata;
 use crate::misc::VariableIdentifier;
 use crate::ttype::atomic::TAtomic;
 
+/// Describes when a callable passed to a parameter is invoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CallableInvocationKind {
+    /// The callable is invoked before the receiving function returns.
+    Immediately,
+    /// The callable may be stored or invoked after the receiving function returns.
+    Later,
+}
+
 /// Contains metadata associated with a single parameter within a function, method, or closure signature.
 ///
 /// This captures details like the parameter's name, type hint, attributes, default value,
@@ -44,6 +54,10 @@ pub struct FunctionLikeParameterMetadata {
     /// When this parameter receives a closure, that closure is invoked with `$this` bound to an
     /// instance of this type. A closure literal passed here is analyzed with `$this` set accordingly.
     pub closure_this_type: Option<TypeMetadata>,
+
+    /// Whether a callable passed to this parameter is invoked immediately or later.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub callable_invocation_kind: Option<CallableInvocationKind>,
 
     /// The inferred type of the parameter's default value, if `has_default` is true and the
     /// type could be determined.
@@ -86,6 +100,7 @@ impl FunctionLikeParameterMetadata {
             type_metadata: None,
             out_type: None,
             closure_this_type: None,
+            callable_invocation_kind: None,
             default_type: None,
         }
     }

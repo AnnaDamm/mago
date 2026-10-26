@@ -141,9 +141,9 @@ Mago and the bundled SDK share an internal binary protocol version and are distr
 
 Follow semantic-version constraints for the Mago package and run integration tests against the minimum and newest supported versions. An independently implemented non-PHP SDK must track Mago's versioned wire protocol; compatibility of the PHP authoring API alone does not guarantee frame compatibility.
 
-The analyzer protocol is **MANA 2.2**. Global constant references can now carry a namespace fallback: selector `5` contains the namespaced name followed by the global fallback name. Resolve the namespaced constant first; use the fallback only when it does not exist.
+MANA 2.2 introduced global constant references with namespace fallback: selector `5` contains the namespaced name followed by the global fallback name. Resolve the namespaced constant first; use the fallback only when it does not exist.
 
-MANA 2.1 workers must update before use with MANA 2.2. The bundled PHP SDK includes this change; keep its version in sync with the Mago binary.
+The analyzer protocol is now **MANA 2.3**. Parameter metadata includes callable invocation timing (`none`, `immediate`, or `later`). MANA 2.2 workers must update before use with MANA 2.3; MANA 2.1 workers must update before use with MANA 2.2. The bundled PHP SDK includes these changes; keep its version in sync with the Mago binary.
 
 ## PHP and dependencies
 

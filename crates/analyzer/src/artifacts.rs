@@ -13,6 +13,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::ttype::combine_owned_union_types_rc;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::union::TUnion;
+use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Node;
@@ -55,6 +56,12 @@ pub struct ResolvedMethodCall {
     pub method: Word,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendingImmediateCallbackThrows {
+    pub(crate) exceptions: WordMap<HashSet<Span>>,
+    pub(crate) issues: Vec<Issue>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ShortCircuitAssignmentTypes {
     pub when_true: WordMap<Rc<TUnion>>,
@@ -87,6 +94,9 @@ pub struct AnalysisArtifacts {
     variable_definedness_targets: Option<Arc<[bool; u8::MAX as usize + 1]>>,
     pub(crate) pending_readonly_property_writes: Vec<PendingReadonlyPropertyWrite>,
     pub(crate) static_local_types: Option<WordMap<Rc<TUnion>>>,
+    pub(crate) deferred_thrown_type_issues: Vec<Issue>,
+    pending_immediate_callback_throws: Vec<(Span, PendingImmediateCallbackThrows)>,
+    immediate_callback_throws_used: HashSet<(u32, u32)>,
     expression_type_checkpoints: ExpressionTypeCheckpoints,
     retain_completed_expression_types: bool,
 }
@@ -125,9 +135,42 @@ impl AnalysisArtifacts {
             variable_definedness_targets: None,
             pending_readonly_property_writes: Vec::new(),
             static_local_types: None,
+            deferred_thrown_type_issues: Vec::new(),
+            pending_immediate_callback_throws: Vec::new(),
+            immediate_callback_throws_used: HashSet::default(),
             expression_type_checkpoints: ExpressionTypeCheckpoints::default(),
             retain_completed_expression_types: true,
         }
+    }
+
+    pub(crate) fn register_pending_immediate_callback_throws(
+        &mut self,
+        span: Span,
+        exceptions: WordMap<HashSet<Span>>,
+        issues: Vec<Issue>,
+    ) {
+        self.pending_immediate_callback_throws.push((span, PendingImmediateCallbackThrows { exceptions, issues }));
+    }
+
+    pub(crate) fn get_pending_immediate_callback_throws(
+        &mut self,
+        span: Span,
+    ) -> Option<PendingImmediateCallbackThrows> {
+        let pending = self.pending_immediate_callback_throws.iter().find_map(|(pending_span, pending)| {
+            (pending_span.start.offset == span.start.offset && pending_span.end.offset == span.end.offset)
+                .then_some(pending.clone())
+        })?;
+
+        self.immediate_callback_throws_used.insert((span.start.offset, span.end.offset));
+        Some(pending)
+    }
+
+    pub(crate) fn take_unresolved_immediate_callback_throws(&mut self) -> Vec<PendingImmediateCallbackThrows> {
+        let used = std::mem::take(&mut self.immediate_callback_throws_used);
+        std::mem::take(&mut self.pending_immediate_callback_throws)
+            .into_iter()
+            .filter_map(|(span, pending)| (!used.contains(&(span.start.offset, span.end.offset))).then_some(pending))
+            .collect()
     }
 
     pub(crate) fn with_retained_expression_types(mut self, retain: bool) -> Self {

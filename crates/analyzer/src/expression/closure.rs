@@ -218,6 +218,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Closure<'arena> {
             &self.parameter_list,
             FunctionLikeBody::Statements(self.body.statements.as_slice(), self.body.span()),
             inferred_parameter_types,
+            true,
         )?;
 
         for referenced_variable in inner_block_context.references_to_external_scope {
@@ -241,6 +242,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Closure<'arena> {
             }
 
             block_context.locals.insert(referenced_variable, variable_type);
+        }
+
+        if !inner_block_context.possibly_thrown_exceptions.is_empty() {
+            artifacts.register_pending_immediate_callback_throws(
+                s,
+                inner_block_context.possibly_thrown_exceptions.clone(),
+                inner_artifacts.deferred_thrown_type_issues.clone(),
+            );
         }
 
         let resulting_closure = resolve_closure_like_type(

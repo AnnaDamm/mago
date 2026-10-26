@@ -12,6 +12,7 @@ use mago_codex::metadata::constant::ConstantMetadata;
 use mago_codex::metadata::enum_case::EnumCaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::parameter::CallableInvocationKind;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::property_hook::PropertyHookMetadata;
@@ -918,6 +919,11 @@ fn write_parameter(
     write_optional_type_metadata(writer, metadata.type_metadata.as_ref(), session)?;
     write_optional_type_metadata(writer, metadata.out_type.as_ref(), session)?;
     write_optional_type_metadata(writer, metadata.closure_this_type.as_ref(), session)?;
+    writer.write_u8(match metadata.callable_invocation_kind {
+        None => 0,
+        Some(CallableInvocationKind::Immediately) => 1,
+        Some(CallableInvocationKind::Later) => 2,
+    });
     write_optional_type_metadata(writer, metadata.default_type.as_ref(), session)?;
     write_attributes(writer, &metadata.attributes, session)?;
     writer.write_u64(metadata.flags.bits());

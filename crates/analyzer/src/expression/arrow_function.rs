@@ -123,7 +123,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrowFunction<'arena> {
             &self.parameter_list,
             FunctionLikeBody::Expression(self.expression),
             inferred_parameter_types,
+            true,
         )?;
+
+        if !inner_block_context.possibly_thrown_exceptions.is_empty() {
+            artifacts.register_pending_immediate_callback_throws(
+                s,
+                inner_block_context.possibly_thrown_exceptions.clone(),
+                inner_artifacts.deferred_thrown_type_issues.clone(),
+            );
+        }
 
         let resulting_closure = resolve_closure_like_type(
             context,

@@ -1569,6 +1569,7 @@ fn create_enum_value_parameter(backing_type: TAtomic, enum_method_span: Span) ->
         type_metadata: Some(TypeMetadata::new(TUnion::from_vec(vec![backing_type]), enum_method_span)),
         out_type: None,
         closure_this_type: None,
+        callable_invocation_kind: None,
         default_type: None,
         span: enum_method_span,
         name_span: enum_method_span,
